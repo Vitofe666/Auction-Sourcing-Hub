@@ -1,5 +1,5 @@
 # Use Microsoft's official image with Python and Chromium system dependencies pre-installed
-FROM mcr.microsoft.com/playwright/python:v1.45.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
 
 WORKDIR /app
 
