@@ -32,23 +32,35 @@ async def scrape_auction(target: TargetURL):
             description = await page.locator(".lot-description-text, .lot-details__description").first.inner_text()
 
             # Extract Image URLs
-            img_elements = await page.locator("img.lot-image, .gallery-thumbnail img").all()
+            await page.wait_for_selector(".lot-image, .gallery-image, .image-gallery", timeout=10000)
+
+            img_elements = await page.locator(
+                "img.lot-image, .image-gallery img, .thumbnail-image img"
+            ).all()
             image_urls = []
 
             for img in img_elements:
                 src = await img.get_attribute("src")
                 if src:
-                    clean_url = src.split('?')[0]
+                    clean_url = src.split("?")[0]
+
                     if not clean_url.startswith("http"):
-                        clean_url = "https:" + clean_url if clean_url.startswith("//") else "https://www.thesaleroom.com" + clean_url
-                    image_urls.append(clean_url)
+                        if clean_url.startswith("//"):
+                            clean_url = "https:" + clean_url
+                        else:
+                            clean_url = "https://www.thesaleroom.com" + clean_url
+
+                    if "placeholder" not in clean_url and "spacer" not in clean_url:
+                        image_urls.append(clean_url)
+
+            final_images = list(set(image_urls))
 
             await browser.close()
 
             return {
                 "title": title.strip(),
                 "description": description.strip(),
-                "images": list(set(image_urls))
+                "images": final_images
             }
 
         except Exception as e:
