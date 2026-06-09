@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Auction Sourcing Hub — Saleroom → Notion",
+  "version": "0.1.0",
+  "description": "One-click send of a Saleroom lot into a Notion database with a formatted condition report.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://www.the-saleroom.com/*",
+    "https://api.notion.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Auction Sourcing Hub"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.the-saleroom.com/*/lot-*"],
+      "js": ["scrapers.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
