@@ -8,7 +8,7 @@ export async function createLotPage({ token, databaseId, data }) {
   const res = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
     headers: {
-      "Authorization": `******
+      "Authorization": `Bearer ${token}`,
       "Notion-Version": NOTION_VERSION,
       "Content-Type": "application/json",
     },
