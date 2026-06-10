@@ -1,28 +1,73 @@
-const tokenEl = document.getElementById("token");
-const dbEl = document.getElementById("dbid");
-const statusEl = document.getElementById("status");
+JavaScript
+document.addEventListener('DOMContentLoaded', () => {
+    const tokenInput = document.getElementById('notionToken');
+    const dbInput = document.getElementById('dbId');
+    const saveBtn = document.getElementById('saveBtn');
+    const scrapeBtn = document.getElementById('scrapeBtn');
+    const statusMsg = document.getElementById('statusMessage');
+    const actionMsg = document.getElementById('actionMessage');
 
-const extractDbId = (input) => {
-  const cleaned = (input || "").trim().replace(/-/g, "");
-  const m = cleaned.match(/[0-9a-f]{32}/i);
-  return m ? m[0] : "";
-};
+    // 1. Load your saved settings as soon as you click the extension icon
+    chrome.storage.local.get(['notionToken', 'notionDbId'], (result) => {
+        if (result.notionToken) tokenInput.value = result.notionToken;
+        if (result.notionDbId) dbInput.value = result.notionDbId;
+    });
 
-chrome.storage.local.get(["notionToken", "notionDbId"], (cfg) => {
-  if (cfg.notionToken) tokenEl.value = cfg.notionToken;
-  if (cfg.notionDbId) dbEl.value = cfg.notionDbId;
-});
+    // 2. Save the settings when you click "Save Settings"
+    saveBtn.addEventListener('click', () => {
+        chrome.storage.local.set({
+            notionToken: tokenInput.value.trim(),
+            notionDbId: dbInput.value.trim()
+        }, () => {
+            statusMsg.style.display = 'block';
+            setTimeout(() => statusMsg.style.display = 'none', 2000); // Hide after 2 seconds
+        });
+    });
 
-document.getElementById("save").addEventListener("click", () => {
-  const notionToken = tokenEl.value.trim();
-  const notionDbId = extractDbId(dbEl.value);
-  if (!notionToken || !notionDbId) {
-    statusEl.textContent = "Both fields required (database ID must be 32 hex chars).";
-    statusEl.className = "status err";
-    return;
-  }
-  chrome.storage.local.set({ notionToken, notionDbId }, () => {
-    statusEl.textContent = "Saved ✓";
-    statusEl.className = "status ok";
-  });
+    // 3. The "Send to Notion" action cascade
+    scrapeBtn.addEventListener('click', async () => {
+        const token = tokenInput.value.trim();
+        const dbId = dbInput.value.trim();
+
+        if (!token || !dbId) {
+            showMessage(actionMsg, 'Please save your Token and DB ID first.', 'red');
+            return;
+        }
+
+        showMessage(actionMsg, 'Scraping page...', '#333');
+
+        // Find the active browser tab
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+        // Tell content.js to extract the data
+        chrome.tabs.sendMessage(tab.id, { action: "scrape_page" }, (response) => {
+            if (chrome.runtime.lastError || !response || !response.data) {
+                showMessage(actionMsg, 'Error scraping. Are you on a lot page?', 'red');
+                return;
+            }
+
+            showMessage(actionMsg, 'Sending to Notion...', '#333');
+
+            // Pass the scraped data + your saved Notion credentials to background.js
+            chrome.runtime.sendMessage({
+                action: "send_to_notion",
+                data: response.data,
+                token: token,
+                databaseId: dbId
+            }, (apiResponse) => {
+                if (apiResponse && apiResponse.success) {
+                    showMessage(actionMsg, 'Success! Item added to Notion.', 'green');
+                } else {
+                    showMessage(actionMsg, 'API Error: ' + (apiResponse ? apiResponse.error : 'Unknown error'), 'red');
+                }
+            });
+        });
+    });
+
+    // Helper to show messages
+    function showMessage(element, text, color) {
+        element.style.color = color;
+        element.innerText = text;
+        element.style.display = 'block';
+    }
 });
