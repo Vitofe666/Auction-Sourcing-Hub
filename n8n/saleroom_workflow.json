@@ -1,0 +1,286 @@
+{
+  "name": "Saleroom Lot Scraper",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "pageUpdatedInDatabase",
+        "databaseId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_YOUR_DATABASE_ID",
+          "mode": "id"
+        },
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": true,
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000001",
+      "name": "Notion Trigger",
+      "type": "n8n-nodes-base.notionTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json['Lot URL'] }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{ $json.Status }}",
+              "rightValue": "Done",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.Status }}",
+              "rightValue": "Error",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000002",
+      "name": "Needs Scraping?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://REPLACE-WITH-YOUR-SCRAPER.onrender.com/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "REPLACE_WITH_YOUR_SCRAPER_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ url: $json['Lot URL'] }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a1000000-0000-0000-0000-000000000003",
+      "name": "Scrape Lot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const scraped = $input.first().json;\nconst pageId = $('Notion Trigger').first().json.id;\n\n// Notion caps each rich_text item at 2000 chars — chunk long text.\nconst chunk = (s, size = 1900) => {\n  const out = [];\n  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));\n  return out;\n};\nconst rt = (s) => ({ type: 'text', text: { content: s } });\nconst paragraphs = (s) => chunk(s).map((c) => ({\n  object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(c)] },\n}));\n\n// ---------- Database properties ----------\nconst properties = {\n  Name: { title: [rt(scraped.title || `Lot ${scraped.lotNumber || '?'} — ${scraped.auctionHouse || 'Unknown'}`)] },\n  Status: { select: { name: 'Done' } },\n};\nif (scraped.lotNumber) {\n  properties['Lot Number'] = { rich_text: [rt(String(scraped.lotNumber))] };\n}\nif (scraped.auctionHouse) {\n  // Select option names cannot contain commas\n  properties['Auction House'] = { select: { name: scraped.auctionHouse.replace(/,/g, ' ').slice(0, 100) } };\n}\nif (/^\\d{4}-\\d{2}-\\d{2}$/.test(scraped.auctionDate || '')) {\n  properties['Auction Date'] = { date: { start: scraped.auctionDate } };\n}\nif (scraped.imageUrl) {\n  properties['Photo'] = { files: [{ type: 'external', name: 'Lot photo', external: { url: scraped.imageUrl } }] };\n}\n\n// ---------- Page body blocks ----------\nconst blocks = [];\n\nblocks.push({\n  object: 'block', type: 'callout',\n  callout: {\n    icon: { type: 'emoji', emoji: '🔨' },\n    color: 'gray_background',\n    rich_text: [rt([\n      `Lot ${scraped.lotNumber || '—'}`,\n      scraped.auctionHouse,\n      scraped.auctionDate,\n    ].filter(Boolean).join('   •   '))],\n  },\n});\nblocks.push({ object: 'block', type: 'divider', divider: {} });\n\nif (scraped.imageUrl) {\n  blocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('🖼️ Lot Photo')] } });\n  blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url: scraped.imageUrl } } });\n  blocks.push({ object: 'block', type: 'divider', divider: {} });\n}\n\nif (scraped.description) {\n  blocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('📝 Description')] } });\n  blocks.push(...paragraphs(scraped.description));\n  blocks.push({ object: 'block', type: 'divider', divider: {} });\n}\n\nblocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('🔍 Condition Report')] } });\nif (scraped.condition) {\n  const parts = chunk(scraped.condition);\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: '⚠️' }, color: 'yellow_background', rich_text: [rt(parts[0])] },\n  });\n  for (const extra of parts.slice(1)) {\n    blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(extra)] } });\n  }\n} else {\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: 'ℹ️' }, color: 'gray_background', rich_text: [rt('No condition report published for this lot.')] },\n  });\n}\n\nblocks.push({ object: 'block', type: 'divider', divider: {} });\nblocks.push({ object: 'block', type: 'bookmark', bookmark: { url: scraped.sourceUrl } });\n\nreturn [{ json: {\n  pageId,\n  propertiesPayload: { properties },\n  blocksPayload: { children: blocks },\n} }];"
+      },
+      "id": "a1000000-0000-0000-0000-000000000004",
+      "name": "Build Notion Payloads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -80]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.pageId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.propertiesPayload) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000005",
+      "name": "Update Properties",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -80],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/blocks/{{ $('Build Notion Payloads').first().json.pageId }}/children",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Build Notion Payloads').first().json.blocksPayload) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000006",
+      "name": "Write Page Body",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -80],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $('Notion Trigger').first().json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { Status: { select: { name: 'Error' } } } }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000007",
+      "name": "Mark Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 120],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE",
+          "name": "Notion account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Notion Trigger": {
+      "main": [
+        [
+          {
+            "node": "Needs Scraping?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Scraping?": {
+      "main": [
+        [
+          {
+            "node": "Scrape Lot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Scrape Lot": {
+      "main": [
+        [
+          {
+            "node": "Build Notion Payloads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notion Payloads": {
+      "main": [
+        [
+          {
+            "node": "Update Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Properties": {
+      "main": [
+        [
+          {
+            "node": "Write Page Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false
+}
