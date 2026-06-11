@@ -142,8 +142,10 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
+    # The site's real domain is the-saleroom.com; accept the no-hyphen variant too.
     host = urlparse(target.url).hostname or ""
-    if not (host == "thesaleroom.com" or host.endswith(".thesaleroom.com")):
+    allowed = ("the-saleroom.com", "thesaleroom.com")
+    if not any(host == d or host.endswith("." + d) for d in allowed):
         raise HTTPException(status_code=400, detail="Only the-saleroom.com lot URLs are supported")
 
     async with async_playwright() as p:
