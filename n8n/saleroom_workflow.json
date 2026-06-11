@@ -23,7 +23,10 @@
       "name": "Notion Trigger",
       "type": "n8n-nodes-base.notionTrigger",
       "typeVersion": 1,
-      "position": [0, 0],
+      "position": [
+        0,
+        0
+      ],
       "credentials": {
         "notionApi": {
           "id": "REPLACE",
@@ -74,7 +77,10 @@
       "name": "Needs Scraping?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [220, 0]
+      "position": [
+        220,
+        0
+      ]
     },
     {
       "parameters": {
@@ -93,14 +99,17 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ url: $json['Lot URL'] }) }}",
         "options": {
-          "timeout": 120000
+          "timeout": 300000
         }
       },
       "id": "a1000000-0000-0000-0000-000000000003",
       "name": "Scrape Lot",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 0],
+      "position": [
+        440,
+        0
+      ],
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 5000,
@@ -108,13 +117,16 @@
     },
     {
       "parameters": {
-        "jsCode": "const scraped = $input.first().json;\nconst pageId = $('Notion Trigger').first().json.id;\n\n// Notion caps each rich_text item at 2000 chars — chunk long text.\nconst chunk = (s, size = 1900) => {\n  const out = [];\n  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));\n  return out;\n};\nconst rt = (s) => ({ type: 'text', text: { content: s } });\nconst paragraphs = (s) => chunk(s).map((c) => ({\n  object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(c)] },\n}));\n\n// ---------- Database properties ----------\nconst properties = {\n  Name: { title: [rt(scraped.title || `Lot ${scraped.lotNumber || '?'} — ${scraped.auctionHouse || 'Unknown'}`)] },\n  Status: { select: { name: 'Done' } },\n};\nif (scraped.lotNumber) {\n  properties['Lot Number'] = { rich_text: [rt(String(scraped.lotNumber))] };\n}\nif (scraped.auctionHouse) {\n  // Select option names cannot contain commas\n  properties['Auction House'] = { select: { name: scraped.auctionHouse.replace(/,/g, ' ').slice(0, 100) } };\n}\nif (/^\\d{4}-\\d{2}-\\d{2}$/.test(scraped.auctionDate || '')) {\n  properties['Auction Date'] = { date: { start: scraped.auctionDate } };\n}\nif (scraped.imageUrl) {\n  properties['Photo'] = { files: [{ type: 'external', name: 'Lot photo', external: { url: scraped.imageUrl } }] };\n}\n\n// ---------- Page body blocks ----------\nconst blocks = [];\n\nblocks.push({\n  object: 'block', type: 'callout',\n  callout: {\n    icon: { type: 'emoji', emoji: '🔨' },\n    color: 'gray_background',\n    rich_text: [rt([\n      `Lot ${scraped.lotNumber || '—'}`,\n      scraped.auctionHouse,\n      scraped.auctionDate,\n    ].filter(Boolean).join('   •   '))],\n  },\n});\nblocks.push({ object: 'block', type: 'divider', divider: {} });\n\nif (scraped.imageUrl) {\n  blocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('🖼️ Lot Photo')] } });\n  blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url: scraped.imageUrl } } });\n  blocks.push({ object: 'block', type: 'divider', divider: {} });\n}\n\nif (scraped.description) {\n  blocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('📝 Description')] } });\n  blocks.push(...paragraphs(scraped.description));\n  blocks.push({ object: 'block', type: 'divider', divider: {} });\n}\n\nblocks.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt('🔍 Condition Report')] } });\nif (scraped.condition) {\n  const parts = chunk(scraped.condition);\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: '⚠️' }, color: 'yellow_background', rich_text: [rt(parts[0])] },\n  });\n  for (const extra of parts.slice(1)) {\n    blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(extra)] } });\n  }\n} else {\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: 'ℹ️' }, color: 'gray_background', rich_text: [rt('No condition report published for this lot.')] },\n  });\n}\n\nblocks.push({ object: 'block', type: 'divider', divider: {} });\nblocks.push({ object: 'block', type: 'bookmark', bookmark: { url: scraped.sourceUrl } });\n\nreturn [{ json: {\n  pageId,\n  propertiesPayload: { properties },\n  blocksPayload: { children: blocks },\n} }];"
+        "jsCode": "// \"Build Notion Payloads\" Code node (n8n, Run Once for All Items).\n// Input: the Scrape Lot response. Output: one item PER BLOCK BATCH (Notion\n// caps block appends at 100/request), each carrying the same pageId and\n// propertiesPayload. The \"Update Properties\" node must have Settings ->\n// \"Execute Once\" = ON; \"Write Page Body\" runs once per item (per batch).\n\nconst scraped = $input.first().json;\nconst pageId = $('Notion Trigger').first().json.id;\n\n// Notion caps each rich_text item at 2000 chars — chunk long text.\nconst chunk = (s, size = 1900) => {\n  const out = [];\n  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));\n  return out;\n};\nconst rt = (s) => ({ type: 'text', text: { content: s } });\n\n// Inline markdown: supports **bold** only (enough for the report format).\nconst rich = (s) => {\n  const parts = [];\n  s.split('**').forEach((seg, i) => {\n    if (!seg) return;\n    for (const piece of chunk(seg)) {\n      const item = { type: 'text', text: { content: piece } };\n      if (i % 2 === 1) item.annotations = { bold: true };\n      parts.push(item);\n    }\n  });\n  return parts.length ? parts : [rt(' ')];\n};\n\nconst paragraphs = (s) => chunk(s).map((c) => ({\n  object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(c)] },\n}));\nconst divider = () => ({ object: 'block', type: 'divider', divider: {} });\nconst heading = (level, s) => ({\n  object: 'block', type: `heading_${level}`, [`heading_${level}`]: { rich_text: rich(s) },\n});\n\n// Line-based markdown -> Notion blocks for the AI report.\nconst mdToBlocks = (md) => {\n  const blocks = [];\n  for (const raw of md.split('\\n')) {\n    const line = raw.trim();\n    if (!line) continue;\n    if (/^-{3,}$/.test(line)) blocks.push(divider());\n    else if (line.startsWith('### ')) blocks.push(heading(3, line.slice(4)));\n    else if (line.startsWith('## ')) blocks.push(heading(2, line.slice(3)));\n    else if (line.startsWith('# ')) blocks.push(heading(1, line.slice(2)));\n    else if (/^[-•*] /.test(line)) blocks.push({\n      object: 'block', type: 'bulleted_list_item',\n      bulleted_list_item: { rich_text: rich(line.slice(2)) },\n    });\n    else if (line.startsWith('> ')) blocks.push({\n      object: 'block', type: 'quote', quote: { rich_text: rich(line.slice(2)) },\n    });\n    else blocks.push({\n      object: 'block', type: 'paragraph', paragraph: { rich_text: rich(line) },\n    });\n  }\n  return blocks;\n};\n\n// ---------- Database properties ----------\nconst properties = {\n  Name: { title: [rt(scraped.title || `Lot ${scraped.lotNumber || '?'} — ${scraped.auctionHouse || 'Unknown'}`)] },\n  Status: { select: { name: 'Done' } },\n};\nif (scraped.lotNumber) {\n  properties['Lot Number'] = { rich_text: [rt(String(scraped.lotNumber))] };\n}\nif (scraped.auctionHouse) {\n  // Select option names cannot contain commas\n  properties['Auction House'] = { select: { name: scraped.auctionHouse.replace(/,/g, ' ').slice(0, 100) } };\n}\nif (/^\\d{4}-\\d{2}-\\d{2}$/.test(scraped.auctionDate || '')) {\n  properties['Auction Date'] = { date: { start: scraped.auctionDate } };\n}\nif (scraped.imageUrl) {\n  properties['Photo'] = { files: [{ type: 'external', name: 'Lot photo', external: { url: scraped.imageUrl } }] };\n}\n\n// ---------- Page body blocks ----------\nconst blocks = [];\n\nblocks.push({\n  object: 'block', type: 'callout',\n  callout: {\n    icon: { type: 'emoji', emoji: '🔨' },\n    color: 'gray_background',\n    rich_text: [rt([\n      `Lot ${scraped.lotNumber || '—'}`,\n      scraped.auctionHouse,\n      scraped.auctionDate,\n    ].filter(Boolean).join('   •   '))],\n  },\n});\nblocks.push(divider());\n\n// --- AI buy-analysis report (the main dossier) ---\nif (scraped.aiReport) {\n  blocks.push(heading(1, '🤖 AI Buy Analysis'));\n  blocks.push(...mdToBlocks(scraped.aiReport));\n  blocks.push(divider());\n} else if (scraped.aiReportError) {\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: '⚠️' }, color: 'red_background', rich_text: [rt(scraped.aiReportError)] },\n  });\n  blocks.push(divider());\n}\n\n// --- Photos ---\nconst gallery = (scraped.imageUrls && scraped.imageUrls.length ? scraped.imageUrls : [scraped.imageUrl])\n  .filter(Boolean).slice(0, 4);\nif (gallery.length) {\n  blocks.push(heading(2, '🖼️ Lot Photos'));\n  for (const url of gallery) {\n    blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url } } });\n  }\n  blocks.push(divider());\n}\n\n// --- Original catalogue text ---\nif (scraped.description) {\n  blocks.push(heading(2, '📝 Catalogue Description'));\n  blocks.push(...paragraphs(scraped.description));\n}\nblocks.push(heading(2, '🔍 Published Condition Text'));\nif (scraped.condition) {\n  const parts = chunk(scraped.condition);\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: '⚠️' }, color: 'yellow_background', rich_text: [rt(parts[0])] },\n  });\n  for (const extra of parts.slice(1)) {\n    blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [rt(extra)] } });\n  }\n} else {\n  blocks.push({\n    object: 'block', type: 'callout',\n    callout: { icon: { type: 'emoji', emoji: 'ℹ️' }, color: 'gray_background', rich_text: [rt('No condition report published for this lot.')] },\n  });\n}\nblocks.push(divider());\nblocks.push({ object: 'block', type: 'bookmark', bookmark: { url: scraped.sourceUrl } });\n\n// ---------- Batch (Notion: max 100 blocks per append request) ----------\nconst BATCH = 90;\nconst items = [];\nfor (let i = 0; i < blocks.length; i += BATCH) {\n  items.push({ json: {\n    pageId,\n    propertiesPayload: { properties },\n    blocksPayload: { children: blocks.slice(i, i + BATCH) },\n  } });\n}\nreturn items;\n"
       },
       "id": "a1000000-0000-0000-0000-000000000004",
       "name": "Build Notion Payloads",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, -80]
+      "position": [
+        660,
+        -80
+      ]
     },
     {
       "parameters": {
@@ -140,13 +152,17 @@
       "name": "Update Properties",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [880, -80],
+      "position": [
+        880,
+        -80
+      ],
       "credentials": {
         "notionApi": {
           "id": "REPLACE",
           "name": "Notion account"
         }
-      }
+      },
+      "executeOnce": true
     },
     {
       "parameters": {
@@ -172,7 +188,10 @@
       "name": "Write Page Body",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1100, -80],
+      "position": [
+        1100,
+        -80
+      ],
       "credentials": {
         "notionApi": {
           "id": "REPLACE",
@@ -204,7 +223,10 @@
       "name": "Mark Error",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [660, 120],
+      "position": [
+        660,
+        120
+      ],
       "credentials": {
         "notionApi": {
           "id": "REPLACE",

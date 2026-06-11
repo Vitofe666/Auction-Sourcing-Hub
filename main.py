@@ -1,6 +1,7 @@
 import os
 from urllib.parse import urlparse
 
+import anthropic
 from fastapi import FastAPI, Header, HTTPException
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
@@ -10,6 +11,12 @@ app = FastAPI()
 # Set SCRAPER_API_KEY on Render; n8n must send it as an X-API-Key header.
 # If unset (e.g. local dev), auth is skipped.
 API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+
+# Set ANTHROPIC_API_KEY on Render to enable the AI buy-analysis report.
+# If unset, /scrape returns the raw lot data only.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+MAX_REPORT_IMAGES = 5
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -115,6 +122,25 @@ SCRAPE_JS = r"""
     return og && og.content ? fullSize(og.content) : "";
   })();
 
+  // All gallery photos (front, back, hallmarks, box...) — the AI condition
+  // analysis needs more than the hero shot.
+  const imageUrls = (() => {
+    const urls = [];
+    const add = (u) => {
+      if (!u || !u.startsWith("http")) return;
+      if (/placeholder|spacer|logo|favicon/i.test(u)) return;
+      const clean = fullSize(u);
+      if (!urls.includes(clean)) urls.push(clean);
+    };
+    add(imageUrl);
+    for (const img of document.querySelectorAll(
+      ".image img[data-lazy], .lot-image img, .image-gallery img, .thumbnail-image img, [class*='gallery' i] img, [class*='thumb' i] img"
+    )) {
+      add(img.getAttribute("data-lazy") || img.currentSrc || img.src);
+    }
+    return urls.slice(0, 8);
+  })();
+
   const title = (() => {
     const h1 = document.querySelector("h1");
     if (h1) return text(h1);
@@ -138,15 +164,97 @@ SCRAPE_JS = r"""
     }
   }
 
-  return { lotNumber, auctionHouse, auctionDate, imageUrl, title, description, condition };
+  return { lotNumber, auctionHouse, auctionDate, imageUrl, imageUrls, title, description, condition };
 }
 """
+
+REPORT_SYSTEM_PROMPT = """You are an expert jewellery, watch and antiques auction analyst producing pre-bid buy reports for a professional reseller sourcing from UK auction houses.
+
+You receive a lot's catalogue title, description, the auction house's published condition text, auction metadata, and photographs. Analyse the photographs carefully — front, reverse, clasps, hallmarks, settings, damage. Published condition text is often minimal or just a reference code, so your own visual assessment is the core of the report. Note anything visible: cracks, chips, repairs, lead solder, replaced parts, wear to high points, missing stones.
+
+Write the report in Markdown using EXACTLY this structure:
+
+## RECOMMENDATION
+**<score> / 10 — <BUY | CONDITIONAL BUY | PASS>**
+- + <key strength> (one bullet per strength)
+- – <key risk / warning> (one bullet per risk)
+
+Auction estimate: £X–£Y (€X–€Y)
+Retail estimate: £X–£Y (€X–€Y)
+
+## BASIC ITEM OVERVIEW
+## GEMSTONE / ARTWORK ANALYSIS
+(include an Artistic/Quality grade out of 10 and, where attribution is claimed, probability estimates such as "Workshop/circle: 35%")
+## DIAMOND DETAILS
+(type, estimated total carat weight, cut, colour/clarity ranges, % piqué — or "N/A" line if no diamonds)
+## METAL & SCRAP VALUE
+(estimated gross/net weights, carat/fineness probabilities, scrap calculation showing the per-gram rates used)
+## PERIOD & WORKMANSHIP
+## CONDITION REPORT
+(bullets; end with **Condition grade: X / 10**)
+## WARNINGS
+(bullets — every material risk a bidder must know)
+## COLLECTABILITY & INVESTMENT
+(Positives and Negatives bullet lists)
+## OVERALL SUMMARY
+## FINAL RECOMMENDATION
+**Buy score: X / 10** — Maximum hammer price: £X (€Y)
+(one short paragraph of rationale)
+
+Rules:
+- All valuations in GBP first with EUR in parentheses; assume £1 = €1.15 and state any rate you use.
+- For metal value use approximate current spot prices and explicitly state the per-gram rates assumed.
+- Never present unverifiable facts as certain. Metal is "untested", attribution is a probability, treatments are estimated likelihoods.
+- Be commercially blunt: the reader is deciding whether to bid and how much. Account for buyer's premium ~30% incl. VAT on top of hammer when setting the maximum hammer price.
+- If the lot is not jewellery (furniture, art, ceramics...), adapt the GEMSTONE/DIAMOND sections to the relevant material analysis and keep every other section.
+- Output ONLY the markdown report — no preamble, no closing remarks."""
+
+
+async def generate_ai_report(data: dict) -> str:
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    facts = f"""Lot metadata:
+- Title: {data.get('title') or 'unknown'}
+- Lot number: {data.get('lotNumber') or 'unknown'}
+- Auction house: {data.get('auctionHouse') or 'unknown'}
+- Auction date: {data.get('auctionDate') or 'unknown'}
+- Lot URL: {data.get('sourceUrl')}
+
+Catalogue description:
+{data.get('description') or '(none published)'}
+
+Published condition text:
+{data.get('condition') or '(none published)'}
+
+The attached photographs are the lot's gallery images. Produce the buy report."""
+
+    content = []
+    for url in (data.get("imageUrls") or [data.get("imageUrl")])[:MAX_REPORT_IMAGES]:
+        if url:
+            content.append({"type": "image", "source": {"type": "url", "url": url}})
+    content.append({"type": "text", "text": facts})
+
+    async with client.messages.stream(
+        model=CLAUDE_MODEL,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        system=REPORT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        message = await stream.get_final_message()
+
+    return "".join(block.text for block in message.content if block.type == "text").strip()
 
 
 # Render needs a simple health check to confirm the server successfully started
 @app.get("/")
 async def health_check():
-    return {"status": "healthy", "service": "saleroom-scraper", "version": "1.1"}
+    return {
+        "status": "healthy",
+        "service": "saleroom-scraper",
+        "version": "1.2",
+        "aiReportEnabled": bool(ANTHROPIC_API_KEY),
+    }
 
 
 @app.post("/scrape")
@@ -192,6 +300,18 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
                     status_code=422,
                     detail="Page loaded but no lot data found — check that the URL is a lot page",
                 )
+
+            # AI buy-analysis report (optional — requires ANTHROPIC_API_KEY).
+            # A failure here must not lose the scraped data, so report errors
+            # in-band instead of raising.
+            data["aiReport"] = ""
+            data["aiReportError"] = ""
+            if ANTHROPIC_API_KEY:
+                try:
+                    data["aiReport"] = await generate_ai_report(data)
+                except Exception as e:
+                    data["aiReportError"] = f"AI report failed: {e}"
+
             return data
 
         except HTTPException:
