@@ -54,11 +54,23 @@ SCRAPE_JS = r"""
 
   const lotNumber = (() => {
     const p = props["Lot Number"];
-    if (p) return (String(p).match(/\d+/) || [String(p)])[0];
-    for (const h of document.querySelectorAll("h1, h2")) {
-      const m = (h.textContent || "").match(/Lot\s+(\d+)/i);
-      if (m) return m[1];
+    if (p) return (String(p).match(/\d+[A-Za-z]?/) || [String(p)])[0];
+    const grab = (s) => {
+      const m = (s || "").match(/\bLot\s+(\d+[A-Za-z]?)\b/i);
+      return m ? m[1] : "";
+    };
+    for (const el of document.querySelectorAll("h1, h2, h3, h4, [class*='lot' i], [data-testid*='lot']")) {
+      const v = grab(el.textContent);
+      if (v) return v;
     }
+    const fromTitle = grab(document.title);
+    if (fromTitle) return fromTitle;
+    // Derive from the prev/next navigation: "Prev lot: 32" → this lot is 33.
+    const bodyText = document.body ? document.body.innerText : "";
+    let m = bodyText.match(/Prev(?:ious)?\s*lot:?\s*(\d+)/i);
+    if (m) return String(parseInt(m[1], 10) + 1);
+    m = bodyText.match(/Next\s*lot:?\s*(\d+)/i);
+    if (m) return String(parseInt(m[1], 10) - 1);
     return "";
   })();
 
@@ -111,16 +123,16 @@ SCRAPE_JS = r"""
   })();
 
   // Catalogue description AND condition notes both live in `.tinyMCEContent`,
-  // separated by a "Condition:" label. Return them as separate fields.
+  // separated by a "Condition:" or "Condition report" label.
   let description = "";
   let condition = "";
   const tiny = document.querySelector(".tinyMCEContent");
   if (tiny) {
     const raw = tiny.innerText.replace(/\u00a0/g, " ").trim();
-    const idx = raw.search(/condition\s*:/i);
+    const idx = raw.search(/condition\s+report\s*:?|condition\s*:/i);
     if (idx !== -1) {
       description = raw.slice(0, idx).trim();
-      condition = raw.slice(idx).replace(/^condition\s*:/i, "").trim();
+      condition = raw.slice(idx).replace(/^condition(\s+report)?\s*:?/i, "").trim();
     } else {
       description = raw;
     }
@@ -134,7 +146,7 @@ SCRAPE_JS = r"""
 # Render needs a simple health check to confirm the server successfully started
 @app.get("/")
 async def health_check():
-    return {"status": "healthy", "service": "saleroom-scraper"}
+    return {"status": "healthy", "service": "saleroom-scraper", "version": "1.1"}
 
 
 @app.post("/scrape")
@@ -166,6 +178,13 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
                 pass
 
             data = await page.evaluate(SCRAPE_JS)
+
+            # Parts of the page can hydrate after domcontentloaded — if the first
+            # pass is incomplete, give it a moment and try once more.
+            if not data["lotNumber"] or not (data["description"] or data["condition"]):
+                await page.wait_for_timeout(2000)
+                data = await page.evaluate(SCRAPE_JS)
+
             data["sourceUrl"] = target.url
 
             if not any([data["lotNumber"], data["title"], data["description"]]):
