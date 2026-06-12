@@ -10,11 +10,11 @@ app = FastAPI()
 
 # Set SCRAPER_API_KEY on Render; n8n must send it as an X-API-Key header.
 # If unset (e.g. local dev), auth is skipped.
-API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 # Set ANTHROPIC_API_KEY on Render to enable the AI buy-analysis report.
 # If unset, /scrape returns the raw lot data only.
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
 MAX_REPORT_IMAGES = 5
 
@@ -260,7 +260,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "saleroom-scraper",
-        "version": "1.3",
+        "version": "1.4",
         "aiReportEnabled": bool(ANTHROPIC_API_KEY),
     }
 
