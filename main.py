@@ -126,10 +126,18 @@ SCRAPE_JS = r"""
   // analysis needs more than the hero shot.
   const imageUrls = (() => {
     const urls = [];
+    // The page also shows "related lots" from OTHER auctions — only keep
+    // images from this lot's own CDN folder / catalogue.
+    const heroDir = imageUrl ? imageUrl.slice(0, imageUrl.lastIndexOf("/") + 1) : "";
+    const catMatch = location.pathname.match(/catalogue-id-([^/]+)/);
+    const catId = catMatch ? catMatch[1] : "";
+    const belongs = (u) =>
+      (heroDir && u.startsWith(heroDir)) || (catId && u.includes("/" + catId + "/"));
     const add = (u) => {
       if (!u || !u.startsWith("http")) return;
-      if (/placeholder|spacer|logo|favicon/i.test(u)) return;
+      if (/placeholder|spacer|logo|favicon|blank-image/i.test(u)) return;
       const clean = fullSize(u);
+      if (!belongs(clean)) return;
       if (!urls.includes(clean)) urls.push(clean);
     };
     add(imageUrl);
@@ -252,7 +260,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "saleroom-scraper",
-        "version": "1.2",
+        "version": "1.3",
         "aiReportEnabled": bool(ANTHROPIC_API_KEY),
     }
 
