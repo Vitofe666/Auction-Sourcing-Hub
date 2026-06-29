@@ -29,8 +29,12 @@ class TargetURL(BaseModel):
 
 
 # Ported from extension/scrapers.js — runs inside the page context.
-# Strategy: prefer Saleroom's inline `baseProps` analytics object and the
-# `.tinyMCEContent` description block; fall back to generic selectors.
+# Multi-site: dispatches on hostname.
+#  - the-saleroom.com: prefer the inline `baseProps` analytics object and the
+#    `.tinyMCEContent` description block; fall back to generic selectors.
+#  - gildings.co.uk: server-rendered markup — read `.lot-title`, `.lot-number`,
+#    `.lot-desc` (catalogue text + a separate "Condition Report" sub-block),
+#    `.date-title`, and the bidpath CDN gallery images.
 SCRAPE_JS = r"""
 () => {
   const text = (el) => (el ? el.textContent.replace(/\s+/g, " ").trim() : "");
@@ -45,6 +49,91 @@ SCRAPE_JS = r"""
 
   // Strip the CDN resize query (?w=540&h=360) so Notion gets the full-size image.
   const fullSize = (url) => (url ? url.split("?")[0] : "");
+
+  // ---- Gildings (gildings.co.uk) ----
+  // Static HTML; the condition report is published inline as a .lot-desc block
+  // whose first child is a "Condition Report" .lot-sub-heading.
+  if (/(^|\.)gildings\.co\.uk$/i.test(location.hostname)) {
+    const lotNumber = (() => {
+      const el = document.querySelector(".lot-number");
+      const src = (el ? el.textContent : "") || document.title || "";
+      const m = src.match(/Lot\s+(\d+[A-Za-z]?)/i) || src.match(/(\d+[A-Za-z]?)/);
+      return m ? m[1] : "";
+    })();
+
+    const title = (() => {
+      const el = document.querySelector(".lot-title");
+      if (el) return text(el);
+      const og = document.querySelector("meta[property='og:title']");
+      return og ? og.content : "";
+    })();
+
+    // e.g. "30th Jun, 2026 10:30" -> "2026-06-30" (built by hand to avoid TZ drift).
+    const auctionDate = (() => {
+      const el = document.querySelector(".date-title");
+      const raw = el ? text(el) : "";
+      const m = raw.match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s+([A-Za-z]+)\.?,?\s+(\d{4})/);
+      if (!m) return "";
+      const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+                       jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+      const mo = months[m[2].slice(0, 3).toLowerCase()];
+      if (!mo) return "";
+      return m[3] + "-" + String(mo).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+    })();
+
+    // The catalogue description and the condition report are both .lot-desc
+    // blocks; the condition one is flagged by a "Condition Report" sub-heading.
+    let description = "";
+    let condition = "";
+    for (const d of document.querySelectorAll(".lot-desc")) {
+      const heading = d.querySelector(".lot-sub-heading");
+      if (heading && /condition/i.test(heading.textContent)) {
+        // Use innerText on the live node so <br> separators become line breaks,
+        // then strip the heading label and the "Request a condition report" button.
+        let t = d.innerText.replace(/\u00a0/g, " ");
+        t = t.replace(heading.innerText, "");
+        const btn = d.querySelector(".condition-request, a[href*='Condition']");
+        if (btn) t = t.replace(btn.innerText, "");
+        condition = t.replace(/^[\s:–-]+/, "").trim();
+      } else if (!description) {
+        description = text(d);
+      }
+    }
+
+    // Bidpath CDN serves -small/-medium/full variants (125351-0-small.jpg etc).
+    // Normalise to the full-size file and dedupe.
+    const toFull = (u) => fullSize(u).replace(/-(?:small|medium)(\.jpg)/i, "$1");
+    const imageUrls = (() => {
+      const urls = [];
+      const add = (u) => {
+        if (!u || !/bidpath\.cloud\/stock\//i.test(u)) return;
+        const clean = toFull(u);
+        if (!urls.includes(clean)) urls.push(clean);
+      };
+      for (const el of document.querySelectorAll(
+        "[data-zoom-image], [data-high-res-src], [data-image], .lot-gallery-wrapper img, .lot-image img"
+      )) {
+        add(
+          el.getAttribute("data-zoom-image") ||
+          el.getAttribute("data-high-res-src") ||
+          el.getAttribute("data-image") ||
+          el.currentSrc || el.src
+        );
+      }
+      const og = document.querySelector("meta[property='og:image']");
+      if (og && og.content) add(og.content);
+      return urls.slice(0, 8);
+    })();
+    const imageUrl = imageUrls[0] || (() => {
+      const og = document.querySelector("meta[property='og:image']");
+      return og && og.content ? toFull(og.content) : "";
+    })();
+
+    return {
+      lotNumber, auctionHouse: "Gildings", auctionDate,
+      imageUrl, imageUrls, title, description, condition,
+    };
+  }
 
   // Saleroom inlines a FLAT analytics object in a <script> tag:
   //   baseProps: {"Lot Number":"132","Auction House Name":"...",
@@ -259,8 +348,8 @@ The attached photographs are the lot's gallery images. Produce the buy report.""
 async def health_check():
     return {
         "status": "healthy",
-        "service": "saleroom-scraper",
-        "version": "1.4",
+        "service": "auction-scraper",
+        "version": "1.5",
         "aiReportEnabled": bool(ANTHROPIC_API_KEY),
     }
 
@@ -270,11 +359,14 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
-    # The site's real domain is the-saleroom.com; accept the no-hyphen variant too.
+    # the-saleroom.com (accept the no-hyphen variant too) and gildings.co.uk.
     host = urlparse(target.url).hostname or ""
-    allowed = ("the-saleroom.com", "thesaleroom.com")
+    allowed = ("the-saleroom.com", "thesaleroom.com", "gildings.co.uk")
     if not any(host == d or host.endswith("." + d) for d in allowed):
-        raise HTTPException(status_code=400, detail="Only the-saleroom.com lot URLs are supported")
+        raise HTTPException(
+            status_code=400,
+            detail="Only the-saleroom.com and gildings.co.uk lot URLs are supported",
+        )
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -287,9 +379,11 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
             # is enough — much faster than waiting for networkidle.
             await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
 
-            # Best-effort wait for the description block; baseProps still works without it.
+            # Best-effort wait for the description block; the rest still works
+            # without it. Saleroom uses .tinyMCEContent, Gildings uses .lot-desc.
+            desc_selector = ".lot-desc" if host.endswith("gildings.co.uk") else ".tinyMCEContent"
             try:
-                await page.wait_for_selector(".tinyMCEContent", timeout=8000)
+                await page.wait_for_selector(desc_selector, timeout=8000)
             except Exception:
                 pass
 
