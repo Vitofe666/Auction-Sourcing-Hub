@@ -35,6 +35,9 @@ class TargetURL(BaseModel):
 #  - gildings.co.uk: server-rendered markup — read `.lot-title`, `.lot-number`,
 #    `.lot-desc` (catalogue text + a separate "Condition Report" sub-block),
 #    `.date-title`, and the bidpath CDN gallery images.
+#  - easyliveauction.com: server-rendered markup — read og:title (full catalogue
+#    line), `.lot-no`, the `/auctioneers/` link, the `.lot-status` date and the
+#    images_lots gallery. No condition report is published inline on this site.
 SCRAPE_JS = r"""
 () => {
   const text = (el) => (el ? el.textContent.replace(/\s+/g, " ").trim() : "");
@@ -132,6 +135,80 @@ SCRAPE_JS = r"""
     return {
       lotNumber, auctionHouse: "Gildings", auctionDate,
       imageUrl, imageUrls, title, description, condition,
+    };
+  }
+
+  // ---- easyliveauction.com ----
+  // Static HTML. The catalogue line is the title (the on-page .lot-desc-h1 is
+  // truncated, so read the full text from og:title). No condition report is
+  // published inline on this site (buyers request it from the auctioneer).
+  if (/(^|\.)easyliveauction\.com$/i.test(location.hostname)) {
+    const og = (sel) => {
+      const m = document.querySelector(sel);
+      return m && m.content ? m.content.trim() : "";
+    };
+    const title = og("meta[property='og:title']") || (document.title || "").trim();
+
+    const lotNumber = (() => {
+      const el = document.querySelector(".lot-no");
+      const src = (el ? el.textContent : "") || document.title || "";
+      const m = src.match(/Lot\s*(\d+[A-Za-z]?)/i) || src.match(/(\d+[A-Za-z]?)/);
+      return m ? m[1] : "";
+    })();
+
+    const auctionHouse = (() => {
+      // Prefer the auctioneer-specific link (/auctioneers/<slug>/), not the bare
+      // "/auctioneers/" nav link. Its text is "by <House>".
+      for (const a of document.querySelectorAll("a[href*='/auctioneers/']")) {
+        const href = a.getAttribute("href") || "";
+        if (!/\/auctioneers\/[^/]+\/?$/.test(href)) continue;
+        const t = text(a).replace(/^by\s+/i, "").trim();
+        if (t && !/^auctioneers$/i.test(t)) return t;
+      }
+      // Fallback: og:description ends with "... by <House>".
+      const m = og("meta[property='og:description']").match(/\bby\s+([^.]+?)\s*$/i);
+      return m ? m[1].trim() : "";
+    })();
+
+    // .lot-status holds "Auction Date: 23rd Jun 26 at ..." (note the 2-digit year).
+    const auctionDate = (() => {
+      const status = document.querySelector(".lot-status");
+      const raw = (status ? status.innerText : "").replace(/\u00a0/g, " ");
+      const after = raw.split(/Auction\s*Date\s*:?/i)[1] || raw;
+      const m = after.match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s+([A-Za-z]{3,})\.?\s+(\d{2,4})/);
+      if (!m) return "";
+      const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+                       jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+      const mo = months[m[2].slice(0, 3).toLowerCase()];
+      if (!mo) return "";
+      const yr = m[3].length === 2 ? "20" + m[3] : m[3];
+      return yr + "-" + String(mo).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+    })();
+
+    // Lot photos come as <id>.JPG (full), _PREVIEW and _THUMB variants; the
+    // _LIVE.JPG frames are auctioneer webcam snapshots, not lot images.
+    const toFull = (u) => fullSize(u).replace(/_(?:PREVIEW|THUMB|LARGE)(\.JPG)/i, "$1");
+    const imageUrls = (() => {
+      const urls = [];
+      const add = (u) => {
+        if (!u || !/content\.easyliveauction\.com\/auctions\/images_lots\//i.test(u)) return;
+        if (/_LIVE\.JPG/i.test(u)) return;
+        const clean = toFull(u);
+        if (!urls.includes(clean)) urls.push(clean);
+      };
+      for (const img of document.querySelectorAll(
+        "img[id^='main-image'], .lot-image-container img, .lot-image, #lot-images-gallery img"
+      )) {
+        add(img.currentSrc || img.getAttribute("src"));
+      }
+      add(og("meta[property='og:image']"));
+      return urls.slice(0, 8);
+    })();
+    const imageUrl = imageUrls[0] || toFull(og("meta[property='og:image']"));
+
+    return {
+      lotNumber, auctionHouse, auctionDate, imageUrl, imageUrls,
+      title, description: title, condition: "",
     };
   }
 
@@ -349,7 +426,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "auction-scraper",
-        "version": "1.5",
+        "version": "1.6",
         "aiReportEnabled": bool(ANTHROPIC_API_KEY),
     }
 
@@ -359,13 +436,14 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
-    # the-saleroom.com (accept the no-hyphen variant too) and gildings.co.uk.
+    # the-saleroom.com (accept the no-hyphen variant too), gildings.co.uk and
+    # easyliveauction.com.
     host = urlparse(target.url).hostname or ""
-    allowed = ("the-saleroom.com", "thesaleroom.com", "gildings.co.uk")
+    allowed = ("the-saleroom.com", "thesaleroom.com", "gildings.co.uk", "easyliveauction.com")
     if not any(host == d or host.endswith("." + d) for d in allowed):
         raise HTTPException(
             status_code=400,
-            detail="Only the-saleroom.com and gildings.co.uk lot URLs are supported",
+            detail="Only the-saleroom.com, gildings.co.uk and easyliveauction.com lot URLs are supported",
         )
 
     async with async_playwright() as p:
@@ -380,8 +458,13 @@ async def scrape_auction(target: TargetURL, x_api_key: str = Header(default=""))
             await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
 
             # Best-effort wait for the description block; the rest still works
-            # without it. Saleroom uses .tinyMCEContent, Gildings uses .lot-desc.
-            desc_selector = ".lot-desc" if host.endswith("gildings.co.uk") else ".tinyMCEContent"
+            # without it. Each site renders its lot text in a different element.
+            if host.endswith("gildings.co.uk"):
+                desc_selector = ".lot-desc"
+            elif host.endswith("easyliveauction.com"):
+                desc_selector = ".lot-desc-h1"
+            else:
+                desc_selector = ".tinyMCEContent"
             try:
                 await page.wait_for_selector(desc_selector, timeout=8000)
             except Exception:
