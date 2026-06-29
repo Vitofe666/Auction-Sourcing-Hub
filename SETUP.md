@@ -1,8 +1,8 @@
 # Auction Sourcing Hub — Automated Notion Pipeline
 
-Paste a the-saleroom.com lot URL into Notion → n8n picks it up → the Render-hosted
-scraper extracts the lot data → n8n writes the properties back and builds a
-formatted Condition Report inside the page body.
+Paste a the-saleroom.com **or gildings.co.uk** lot URL into Notion → n8n picks it
+up → the Render-hosted scraper extracts the lot data → n8n writes the properties
+back and builds a formatted Condition Report inside the page body.
 
 ```
 ┌─────────┐  poll (1 min)  ┌─────────────┐  POST /scrape   ┌──────────────────┐
