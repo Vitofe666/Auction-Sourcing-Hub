@@ -1,8 +1,9 @@
 # Auction Sourcing Hub — Automated Notion Pipeline
 
-Paste a the-saleroom.com **or gildings.co.uk** lot URL into Notion → n8n picks it
-up → the Render-hosted scraper extracts the lot data → n8n writes the properties
-back and builds a formatted Condition Report inside the page body.
+Paste a lot URL into Notion → n8n picks it up → the Render-hosted scraper
+extracts the lot data → n8n writes the properties back and builds a formatted
+Condition Report inside the page body. Supported sites: **the-saleroom.com**,
+**lot-tissimo.com**, **gildings.co.uk** and **easyliveauction.com**.
 
 ```
 ┌─────────┐  poll (1 min)  ┌─────────────┐  POST /scrape   ┌──────────────────┐
@@ -59,8 +60,19 @@ the ID is the 32-char hex string before `?v=`.
    - **Instance type:** Free works, but it sleeps after 15 min idle — the first
      scrape after a sleep takes ~60–90 s (the n8n HTTP node is configured with a
      120 s timeout and one retry to absorb this). Starter ($7/mo) removes the cold start.
-   - **Environment variable:** `SCRAPER_API_KEY` = a long random string
-     (e.g. run `openssl rand -hex 32`). n8n must send this as the `X-API-Key` header.
+   - **Environment variables:**
+     - `SCRAPER_API_KEY` = a long random string (e.g. run `openssl rand -hex 32`).
+       n8n must send this as the `X-API-Key` header.
+     - `ANTHROPIC_API_KEY` = your Claude API key (enables the AI buy report).
+     - *(optional)* `GOLD_PRICE_URL` — the live trade-scrap price source for the
+       metal calculation. Defaults to `https://www.cooksongold.com/metalprices/`
+       (the "Trade Scrap Price" table, GBP per gram by carat).
+     - *(optional)* `SCRAP_MARGIN_DIVISOR` — defaults to `135`; scrap value =
+       trade-scrap £/g ÷ 135 × 100 × net metal weight (i.e. ~74% of trade scrap).
+     - *(optional)* `RAPAPORT_GUIDE_FILE` — path to the diamond price guide the
+       AI uses. Defaults to `reference/rapaport_guide.txt` in the repo. Paste your
+       current licensed Rapaport data into that file and refresh it weekly; if it
+       is left as the placeholder the AI falls back to general Rapaport-style tiers.
 4. Deploy, then smoke-test:
 
    ```bash
@@ -147,6 +159,11 @@ response: the database `properties` object and the page-body `children` blocks
 array. It chunks text into ≤1900-char pieces (Notion caps rich_text items at
 2000 chars), strips commas from select names (Notion rejects them), and omits
 any property the scraper couldn't fill so you never overwrite data with blanks.
+It also renders the AI report's Markdown — including the ficha decision-grid
+**tables** (a `| … |` row followed by a `| --- |` separator → a Notion table
+block; `<br>` inside a cell becomes a line break). If you imported the workflow
+before this change, re-paste [n8n/build_notion_payloads.js](n8n/build_notion_payloads.js)
+into this node so the tables render.
 
 **⑤ HTTP Request "Update Properties"** — `PATCH https://api.notion.com/v1/pages/{{pageId}}`
 with the properties payload, authenticated with the Notion credential
